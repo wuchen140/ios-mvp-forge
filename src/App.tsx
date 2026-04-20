@@ -3,7 +3,7 @@ import type { ChangeEvent, DragEvent } from 'react'
 import './App.css'
 
 type ViewKey = 'deconstruct' | 'brief' | 'agents' | 'review'
-type RunState = 'idle' | 'running' | 'done'
+type RunState = 'idle' | 'running' | 'done' | 'error'
 type Language = 'zh' | 'en'
 type FileKind = 'ipa' | 'store' | 'video' | 'supporting'
 type ProviderId =
@@ -37,7 +37,106 @@ type AnalysisResult = {
   economyRows?: string[][]
   opportunities?: string[]
   briefStatement?: string
+  packageSummary?: string
+  mustValidate?: string[]
+  notInMvp?: string[]
+  risks?: string[]
+  nextTasks?: string[]
+  recommendation?: string
+  recommendationReason?: string
   status?: string
+}
+
+type ParserPackageSummary = {
+  displayName?: string | null
+  bundleId?: string | null
+  version?: string | null
+  minimumOS?: string | null
+}
+
+type ParserStructureSummary = {
+  engine?: string | null
+  frameworks?: string[]
+  interestingFiles?: string[]
+  topDirectories?: { name: string; count: number }[]
+}
+
+type ParserResult = {
+  file?: {
+    name?: string
+    sizeMB?: number
+  }
+  package?: ParserPackageSummary
+  structure?: ParserStructureSummary
+  analysisHints?: string[]
+}
+
+type StageKey = 'input' | 'parser' | 'prompt' | 'analysis' | 'brief'
+type StageState = 'pending' | 'active' | 'done' | 'error'
+
+type PipelineStage = {
+  key: StageKey
+  label: string
+  state: StageState
+  detail: string
+}
+
+type ParserConnection = {
+  status: 'disabled' | 'checking' | 'ready' | 'offline'
+  message: string
+}
+
+type MarketMetadata = {
+  appId: string
+  name: string
+  developer: string
+  genre: string
+  averageRating: number | null
+  ratingCount: number | null
+  description: string
+  storeUrl: string
+  artworkUrl: string
+}
+
+type MarketReview = {
+  author: string
+  rating: number
+  title: string
+  content: string
+  version: string
+  updated: string
+}
+
+type MarketTheme = {
+  label: string
+  mentions: number
+  tone: 'positive' | 'negative' | 'mixed'
+}
+
+type MarketIntel = {
+  appId: string
+  country: string
+  fetchedAt: string
+  metadata: MarketMetadata | null
+  reviews: MarketReview[]
+  reviewThemes: MarketTheme[]
+}
+
+type SavedProject = {
+  id: string
+  projectName: string
+  createdAt: string
+  language: Language
+  selectedProvider: ProviderId
+  files: Array<Pick<UploadedFile, 'id' | 'name' | 'kind' | 'size'>>
+  primaryFileId: string | null
+  marketAppId: string
+  marketUrl: string
+  marketCountry: string
+  marketIntel: MarketIntel | null
+  analysisNotes: string
+  analysisResult: AnalysisResult | null
+  parserResult: ParserResult | null
 }
 
 const assetBase = import.meta.env.BASE_URL
@@ -393,6 +492,121 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function sanitizeList(value: unknown, limit = 4) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => String(item ?? '').trim())
+        .filter(Boolean)
+        .slice(0, limit)
+    : []
+}
+
+function getStageLabel(language: Language, key: StageKey) {
+  const labels: Record<Language, Record<StageKey, string>> = {
+    zh: {
+      input: '输入检查',
+      parser: 'IPA 解析',
+      prompt: '构建提示',
+      analysis: 'AI 拆解',
+      brief: '生成 Brief',
+    },
+    en: {
+      input: 'Input check',
+      parser: 'IPA parse',
+      prompt: 'Prompt build',
+      analysis: 'AI analysis',
+      brief: 'Brief output',
+    },
+  }
+
+  return labels[language][key]
+}
+
+function buildPipelineStages(language: Language, previous?: PipelineStage[]) {
+  const defaultDetail = language === 'zh' ? '等待开始' : 'Waiting'
+  const order: StageKey[] = ['input', 'parser', 'prompt', 'analysis', 'brief']
+
+  return order.map((key) => {
+    const existing = previous?.find((item) => item.key === key)
+    return {
+      key,
+      label: getStageLabel(language, key),
+      state: existing?.state ?? 'pending',
+      detail: existing?.detail ?? defaultDetail,
+    }
+  })
+}
+
+function formatTimestamp(iso: string, language: Language) {
+  try {
+    return new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(iso))
+  } catch {
+    return iso
+  }
+}
+
+function parseAppStoreId(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const match = trimmed.match(/id(\d{5,})/i) ?? trimmed.match(/\b(\d{5,})\b/)
+  return match?.[1] ?? ''
+}
+
+function buildReviewThemes(reviews: MarketReview[], language: Language): MarketTheme[] {
+  const buckets = [
+    {
+      label: language === 'zh' ? '性能稳定性' : 'Performance',
+      keywords: ['crash', 'bug', 'freeze', 'slow', 'lag', 'loading', 'stuck', '卡', '崩', '闪退', '慢'],
+    },
+    {
+      label: language === 'zh' ? '定价付费' : 'Pricing',
+      keywords: ['price', 'subscription', 'pay', 'paid', 'expensive', 'billing', '收费', '订阅', '贵'],
+    },
+    {
+      label: language === 'zh' ? '上手体验' : 'Onboarding',
+      keywords: ['easy', 'confusing', 'learn', 'tutorial', 'guide', 'beginner', '理解', '上手', '教程'],
+    },
+    {
+      label: language === 'zh' ? '内容质量' : 'Output quality',
+      keywords: ['accurate', 'wrong', 'helpful', 'useless', 'quality', 'answer', '结果', '质量', '回答'],
+    },
+    {
+      label: language === 'zh' ? '留存动力' : 'Retention pull',
+      keywords: ['fun', 'boring', 'return', 'daily', 'engaging', 'addictive', '好玩', '无聊', '回访'],
+    },
+  ]
+
+  const results = buckets
+    .map((bucket) => {
+      const matched = reviews.filter((review) => {
+        const text = `${review.title} ${review.content}`.toLowerCase()
+        return bucket.keywords.some((keyword) => text.includes(keyword.toLowerCase()))
+      })
+
+      if (!matched.length) return null
+
+      const avgRating =
+        matched.reduce((sum, review) => sum + review.rating, 0) / matched.length
+      const tone: MarketTheme['tone'] =
+        avgRating >= 4 ? 'positive' : avgRating <= 2.6 ? 'negative' : 'mixed'
+
+      return {
+        label: bucket.label,
+        mentions: matched.length,
+        tone,
+      }
+    })
+    .filter((item): item is MarketTheme => Boolean(item))
+    .sort((a, b) => b.mentions - a.mentions)
+
+  return results.slice(0, 4)
+}
+
 function safeJsonParse(text: string): Partial<AnalysisResult> {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
   const source = fenced ?? text
@@ -431,7 +645,132 @@ function normalizeAnalysis(raw: Partial<AnalysisResult>): AnalysisResult {
       ? raw.opportunities.slice(0, 4).map((item) => String(item))
       : undefined,
     briefStatement: raw.briefStatement ? String(raw.briefStatement) : undefined,
+    packageSummary: raw.packageSummary ? String(raw.packageSummary) : undefined,
+    mustValidate: sanitizeList(raw.mustValidate, 4),
+    notInMvp: sanitizeList(raw.notInMvp, 6),
+    risks: sanitizeList(raw.risks, 4),
+    nextTasks: sanitizeList(raw.nextTasks, 5),
+    recommendation: raw.recommendation ? String(raw.recommendation) : undefined,
+    recommendationReason: raw.recommendationReason ? String(raw.recommendationReason) : undefined,
     status: raw.status ? String(raw.status) : undefined,
+  }
+}
+
+function summarizeParserResult(parserResult: ParserResult | null, language: Language) {
+  if (!parserResult) return language === 'zh' ? '未使用结构化 IPA 事实。' : 'No structured IPA facts yet.'
+
+  const packageInfo = parserResult.package
+  const structure = parserResult.structure
+  const hints = parserResult.analysisHints ?? []
+  const lines = [
+    packageInfo?.displayName ? `${language === 'zh' ? '应用名' : 'App'}: ${packageInfo.displayName}` : '',
+    packageInfo?.bundleId ? `Bundle ID: ${packageInfo.bundleId}` : '',
+    structure?.engine ? `${language === 'zh' ? '引擎' : 'Engine'}: ${structure.engine}` : '',
+    structure?.frameworks?.length
+      ? `${language === 'zh' ? '关键框架' : 'Frameworks'}: ${structure.frameworks.slice(0, 4).join(', ')}`
+      : '',
+    hints.length
+      ? `${language === 'zh' ? '线索' : 'Hints'}: ${hints.slice(0, 2).join(' ')}`
+      : '',
+  ].filter(Boolean)
+
+  return lines.join('\n')
+}
+
+function summarizeMarketIntel(marketIntel: MarketIntel | null, language: Language) {
+  if (!marketIntel?.metadata) {
+    return language === 'zh' ? '暂无 App Store 市场事实。' : 'No App Store market facts yet.'
+  }
+
+  const { metadata, reviews, reviewThemes } = marketIntel
+  const ratingText =
+    metadata.averageRating !== null && metadata.ratingCount !== null
+      ? `${metadata.averageRating.toFixed(1)} / 5 (${metadata.ratingCount})`
+      : language === 'zh'
+        ? '无评分'
+        : 'No ratings'
+  const reviewSnippet = reviews[0]
+    ? `${language === 'zh' ? '最新评论' : 'Latest review'}: ${reviews[0].title} (${reviews[0].rating}/5)`
+    : ''
+  const themeSnippet = reviewThemes.length
+    ? `${language === 'zh' ? '评论主题' : 'Review themes'}: ${reviewThemes
+        .map((theme) => `${theme.label} x${theme.mentions}`)
+        .join(', ')}`
+    : ''
+
+  return [
+    `${language === 'zh' ? '应用' : 'App'}: ${metadata.name}`,
+    `${language === 'zh' ? '开发者' : 'Developer'}: ${metadata.developer}`,
+    `${language === 'zh' ? '分类' : 'Genre'}: ${metadata.genre}`,
+    `${language === 'zh' ? '评分' : 'Rating'}: ${ratingText}`,
+    themeSnippet,
+    reviewSnippet,
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+function hydrateAnalysis(
+  raw: AnalysisResult,
+  parserResult: ParserResult | null,
+  language: Language,
+): AnalysisResult {
+  const opportunities = raw.opportunities?.length
+    ? raw.opportunities
+    : language === 'zh'
+      ? ['缩短首日系统暴露，优先验证最核心的战斗循环。']
+      : ['Reduce first-day system load and validate the core combat loop first.']
+
+  const risks = raw.risks?.length ? raw.risks : parserResult?.analysisHints?.slice(0, 3) ?? []
+  const notInMvp = raw.notInMvp?.length
+    ? raw.notInMvp
+    : language === 'zh'
+      ? ['完整抽卡池', '公会系统', '重运营活动']
+      : ['Full gacha pool', 'Guild systems', 'Heavy live ops']
+  const mustValidate = raw.mustValidate?.length
+    ? raw.mustValidate
+    : language === 'zh'
+      ? ['玩家能在五分钟内理解目标并愿意再开一局。']
+      : ['Players understand the goal within five minutes and want another run.']
+  const nextTasks = raw.nextTasks?.length ? raw.nextTasks : opportunities.map((item) => item)
+  const recommendation =
+    raw.recommendation ??
+    (risks.length >= 2
+      ? language === 'zh'
+        ? '调整后再测'
+        : 'Adjust and retest'
+      : language === 'zh'
+        ? '继续推进'
+        : 'Continue')
+
+  return {
+    ...raw,
+    packageSummary:
+      raw.packageSummary ??
+      (parserResult
+        ? language === 'zh'
+          ? `已从 IPA 中提取结构化事实。${summarizeParserResult(parserResult, language).split('\n')[0] ?? ''}`
+          : `Structured IPA facts extracted. ${summarizeParserResult(parserResult, language).split('\n')[0] ?? ''}`
+        : undefined),
+    mustValidate,
+    notInMvp,
+    risks,
+    nextTasks,
+    recommendation,
+    recommendationReason:
+      raw.recommendationReason ??
+      (language === 'zh'
+        ? '先确认首局理解、战斗爽点和资源节奏，再决定是否扩范围。'
+        : 'Validate first-session clarity, combat payoff, and pacing before expanding scope.'),
+    status:
+      raw.status ??
+      (parserResult
+        ? language === 'zh'
+          ? '已结合本地 IPA 结构化事实完成拆解。'
+          : 'Analysis completed with local IPA facts.'
+        : language === 'zh'
+          ? '已用文本和备注完成拆解。'
+          : 'Analysis completed from text inputs and notes.'),
   }
 }
 
@@ -440,11 +779,15 @@ function buildAnalysisPrompt(
   files: UploadedFile[],
   notes: string,
   extractedText: string,
+  parserResult: ParserResult | null,
+  marketIntel: MarketIntel | null,
 ) {
   const outputLanguage = language === 'zh' ? '中文' : 'English'
   const fileSummary = files
     .map((file) => `- ${file.name} | ${file.kind} | ${file.size}`)
     .join('\n')
+  const parserFacts = parserResult ? summarizeParserResult(parserResult, language) : '(none)'
+  const marketFacts = marketIntel ? summarizeMarketIntel(marketIntel, language) : '(none)'
 
   return `You are a senior mobile game product analyst. Deconstruct an iOS competitor mobile game package and supporting materials for MVP innovation planning.
 
@@ -456,11 +799,17 @@ ${fileSummary}
 User notes / store links / playtest notes:
 ${notes || '(none)'}
 
+Structured IPA facts:
+${parserFacts}
+
+App Store market facts:
+${marketFacts}
+
 Extracted readable file text:
 ${extractedText || '(none)'}
 
 Important constraints:
-- If the IPA binary itself was provided, infer only from filename, package metadata, and user-supplied notes unless readable text is included.
+- Treat structured IPA facts as hard evidence.
 - Separate competitor facts from innovation assumptions.
 - Focus on iOS mobile game systems: first-day flow, battle/core loop, meta growth, economy, monetization pressure, live-ops cadence, retention risk.
 - Return only valid JSON. No markdown.
@@ -471,7 +820,14 @@ JSON schema:
   "modules": [["module title", "module finding", "blue|orange|green|red|gray"]],
   "economyRows": [["resource/system", "observed clue", "design implication"]],
   "opportunities": ["four innovation opportunities"],
+  "packageSummary": "one concise summary of the package facts that matter for MVP planning",
   "briefStatement": "one concise MVP strategic hypothesis",
+  "mustValidate": ["up to four validation questions"],
+  "notInMvp": ["up to six items to exclude from the first build"],
+  "risks": ["up to four core product or tech risks"],
+  "nextTasks": ["up to five next iteration tasks"],
+  "recommendation": "Continue | Adjust and retest | Stop project",
+  "recommendationReason": "one short reason for the recommendation",
   "status": "short analysis status note"
 }`
 }
@@ -501,6 +857,94 @@ async function extractReadableText(files: UploadedFile[]) {
   )
 
   return chunks.join('\n\n').slice(0, 48_000)
+}
+
+async function probeLocalParser() {
+  const response = await fetch('http://127.0.0.1:8787/health')
+  if (!response.ok) {
+    throw new Error(`Parser ${response.status}`)
+  }
+
+  return (await response.json()) as { ok?: boolean }
+}
+
+async function callLocalParser(file: File) {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await fetch('http://127.0.0.1:8787/parse-ipa', {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+
+  return (await response.json()) as ParserResult
+}
+
+async function fetchMarketIntel(appId: string, country: string, language: Language) {
+  const normalizedCountry = country.trim().toLowerCase() || 'us'
+  const [lookupResponse, reviewsResponse] = await Promise.all([
+    fetch(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appId)}&country=${encodeURIComponent(normalizedCountry)}`),
+    fetch(
+      `https://itunes.apple.com/${encodeURIComponent(normalizedCountry)}/rss/customerreviews/id=${encodeURIComponent(appId)}/sortBy=mostRecent/json?l=en&cc=${encodeURIComponent(normalizedCountry)}`,
+    ),
+  ])
+
+  if (!lookupResponse.ok) {
+    throw new Error(`App Store lookup ${lookupResponse.status}`)
+  }
+
+  const lookupData = (await lookupResponse.json()) as {
+    resultCount?: number
+    results?: Array<Record<string, unknown>>
+  }
+  const record = lookupData.results?.[0]
+
+  if (!record) {
+    throw new Error('App Store app not found')
+  }
+
+  let reviews: MarketReview[] = []
+  if (reviewsResponse.ok) {
+    const reviewsData = (await reviewsResponse.json()) as {
+      feed?: { entry?: Array<Record<string, unknown>> }
+    }
+    reviews = (reviewsData.feed?.entry ?? [])
+      .filter((entry) => typeof entry['im:rating'] === 'object')
+      .slice(0, 8)
+      .map((entry) => ({
+        author: String((entry.author as { name?: { label?: string } })?.name?.label ?? ''),
+        rating: Number((entry['im:rating'] as { label?: string })?.label ?? 0),
+        title: String((entry.title as { label?: string })?.label ?? ''),
+        content: String((entry.content as { label?: string })?.label ?? ''),
+        version: String((entry['im:version'] as { label?: string })?.label ?? ''),
+        updated: String((entry.updated as { label?: string })?.label ?? ''),
+      }))
+  }
+
+  return {
+    appId,
+    country: normalizedCountry,
+    fetchedAt: new Date().toISOString(),
+    metadata: {
+      appId,
+      name: String(record.trackName ?? ''),
+      developer: String(record.artistName ?? ''),
+      genre: String(record.primaryGenreName ?? ''),
+      averageRating:
+        typeof record.averageUserRating === 'number' ? record.averageUserRating : null,
+      ratingCount:
+        typeof record.userRatingCount === 'number' ? record.userRatingCount : null,
+      description: String(record.description ?? ''),
+      storeUrl: String(record.trackViewUrl ?? ''),
+      artworkUrl: String(record.artworkUrl100 ?? record.artworkUrl60 ?? ''),
+    },
+    reviews,
+    reviewThemes: buildReviewThemes(reviews, language),
+  } satisfies MarketIntel
 }
 
 async function callAiProvider(
@@ -596,12 +1040,17 @@ async function callAiProvider(
 }
 
 function App() {
+  const defaultLanguage =
+    typeof window === 'undefined' || window.localStorage.getItem('mvp-forge-language') !== 'en'
+      ? 'zh'
+      : 'en'
   const [activeView, setActiveView] = useState<ViewKey>('deconstruct')
   const [language, setLanguage] = useState<Language>(() => {
     if (typeof window === 'undefined') return 'zh'
     return window.localStorage.getItem('mvp-forge-language') === 'en' ? 'en' : 'zh'
   })
   const [files, setFiles] = useState<UploadedFile[]>(initialFiles)
+  const [primaryFileId, setPrimaryFileId] = useState<string | null>(() => initialFiles[0]?.id ?? null)
   const [runState, setRunState] = useState<RunState>('idle')
   const [selectedAgent, setSelectedAgent] = useState(0)
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>(() => {
@@ -622,9 +1071,51 @@ function App() {
     const saved = window.localStorage.getItem('mvp-forge-api-keys')
     return saved ? (JSON.parse(saved) as Record<string, string>) : {}
   })
+  const [projectName, setProjectName] = useState(() => {
+    if (typeof window === 'undefined') return defaultLanguage === 'zh' ? '未命名项目' : 'Untitled project'
+    return (
+      window.localStorage.getItem('mvp-forge-project-name') ??
+      (defaultLanguage === 'zh' ? '未命名项目' : 'Untitled project')
+    )
+  })
+  const [useLocalParser, setUseLocalParser] = useState(() => {
+    if (typeof window === 'undefined') return true
+    return window.localStorage.getItem('mvp-forge-use-local-parser') !== 'false'
+  })
+  const [parserConnection, setParserConnection] = useState<ParserConnection>(() => ({
+    status: 'checking',
+    message: defaultLanguage === 'zh' ? '检查本地解析器中' : 'Checking local parser',
+  }))
+  const [parserResult, setParserResult] = useState<ParserResult | null>(null)
+  const [marketUrl, setMarketUrl] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return window.localStorage.getItem('mvp-forge-market-url') ?? ''
+  })
+  const [marketAppId, setMarketAppId] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return window.localStorage.getItem('mvp-forge-market-app-id') ?? ''
+  })
+  const [marketCountry, setMarketCountry] = useState(() => {
+    if (typeof window === 'undefined') return 'us'
+    return window.localStorage.getItem('mvp-forge-market-country') ?? 'us'
+  })
+  const [marketIntel, setMarketIntel] = useState<MarketIntel | null>(() => {
+    if (typeof window === 'undefined') return null
+    const saved = window.localStorage.getItem('mvp-forge-market-intel')
+    return saved ? (JSON.parse(saved) as MarketIntel) : null
+  })
+  const [marketStatus, setMarketStatus] = useState('')
+  const [savedProjects, setSavedProjects] = useState<SavedProject[]>(() => {
+    if (typeof window === 'undefined') return []
+    const saved = window.localStorage.getItem('mvp-forge-project-history')
+    return saved ? (JSON.parse(saved) as SavedProject[]) : []
+  })
   const [analysisNotes, setAnalysisNotes] = useState('')
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
   const [analysisError, setAnalysisError] = useState('')
+  const [pipelineStages, setPipelineStages] = useState<PipelineStage[]>(() =>
+    buildPipelineStages(defaultLanguage),
+  )
 
   const t = copy[language]
   const nextLanguage: Language = language === 'zh' ? 'en' : 'zh'
@@ -646,25 +1137,163 @@ function App() {
     window.localStorage.setItem('mvp-forge-api-keys', JSON.stringify(apiKeys))
   }, [apiKeys])
 
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-project-name', projectName)
+  }, [projectName])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-use-local-parser', String(useLocalParser))
+  }, [useLocalParser])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-market-url', marketUrl)
+  }, [marketUrl])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-market-app-id', marketAppId)
+  }, [marketAppId])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-market-country', marketCountry)
+  }, [marketCountry])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-market-intel', JSON.stringify(marketIntel))
+  }, [marketIntel])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-project-history', JSON.stringify(savedProjects))
+  }, [savedProjects])
+
+  useEffect(() => {
+    if (!useLocalParser) {
+      return
+    }
+
+    let cancelled = false
+
+    probeLocalParser()
+      .then(() => {
+        if (cancelled) return
+        setParserConnection({
+          status: 'ready',
+          message:
+            language === 'zh'
+              ? '本地解析器在线，支持结构化 IPA 拆解'
+              : 'Local parser is ready for structured IPA analysis',
+        })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setParserConnection({
+          status: 'offline',
+          message:
+            language === 'zh'
+              ? '本地解析器未启动，可运行 npm run parser'
+              : 'Local parser is offline. Start it with npm run parser',
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [language, useLocalParser])
+
   const progress = useMemo(() => {
-    if (runState === 'idle') return 0
-    if (runState === 'running') return 71
-    return 100
-  }, [runState])
+    const done = pipelineStages.filter((item) => item.state === 'done').length
+    const active = pipelineStages.some((item) => item.state === 'active') ? 0.5 : 0
+    return Math.round(((done + active) / pipelineStages.length) * 100)
+  }, [pipelineStages])
+  const displayedStages = useMemo(
+    () => pipelineStages.map((item) => ({ ...item, label: getStageLabel(language, item.key) })),
+    [language, pipelineStages],
+  )
+  const parserStatusDisplay = useMemo<ParserConnection>(
+    () =>
+      useLocalParser
+        ? parserConnection
+        : {
+            status: 'disabled',
+            message: language === 'zh' ? '已关闭本地解析器' : 'Local parser disabled',
+          },
+    [language, parserConnection, useLocalParser],
+  )
+
+  const primaryFile =
+    files.find((item) => item.id === primaryFileId) ??
+    files.find((item) => item.kind === 'ipa') ??
+    files[0] ??
+    null
+  const providerConfig = providerConfigs[selectedProvider]
+  const inferredMarketAppId = parseAppStoreId(marketAppId || marketUrl)
+
+  function updateStage(key: StageKey, state: StageState, detail: string) {
+    setPipelineStages((current) =>
+      current.map((item) => (item.key === key ? { ...item, state, detail } : item)),
+    )
+  }
+
+  function resetPipeline() {
+    setPipelineStages(buildPipelineStages(language))
+  }
 
   function addFiles(fileList: FileList | null) {
     if (!fileList) return
 
-    const nextFiles = Array.from(fileList).map((file) => ({
+    const incoming = Array.from(fileList).map((file) => ({
       id: `${file.name}-${file.lastModified}`,
       name: file.name,
-      kind: file.name.endsWith('.ipa') ? 'ipa' : ('supporting' as FileKind),
+      kind: file.name.toLowerCase().endsWith('.ipa') ? 'ipa' : ('supporting' as FileKind),
       size: formatSize(file.size),
       file,
     }))
 
-    setFiles((current) => [...nextFiles, ...current])
+    setFiles((current) => {
+      const existingIds = new Set(current.map((item) => item.id))
+      const deduped = incoming.filter((item) => !existingIds.has(item.id))
+      const next = [...deduped, ...current]
+      const nextPrimary =
+        next.find((item) => item.id === primaryFileId)?.id ??
+        deduped.find((item) => item.kind === 'ipa')?.id ??
+        next.find((item) => item.kind === 'ipa')?.id ??
+        next[0]?.id ??
+        null
+      setPrimaryFileId(nextPrimary)
+      return next
+    })
     setRunState('idle')
+    setAnalysisError('')
+    resetPipeline()
+  }
+
+  function removeFile(fileId: string) {
+    setFiles((current) => {
+      const next = current.filter((item) => item.id !== fileId)
+      const nextPrimary =
+        primaryFileId === fileId
+          ? next.find((item) => item.kind === 'ipa')?.id ?? next[0]?.id ?? null
+          : primaryFileId
+      setPrimaryFileId(nextPrimary)
+      return next
+    })
+    setRunState('idle')
+    resetPipeline()
+  }
+
+  function clearInputs() {
+    setFiles([])
+    setPrimaryFileId(null)
+    setAnalysisResult(null)
+    setParserResult(null)
+    setMarketIntel(null)
+    setMarketStatus('')
+    setMarketAppId('')
+    setMarketUrl('')
+    setMarketCountry('us')
+    setAnalysisNotes('')
+    setAnalysisError('')
+    setRunState('idle')
+    resetPipeline()
   }
 
   function handleDrop(event: DragEvent<HTMLLabelElement>) {
@@ -677,47 +1306,248 @@ function App() {
     event.target.value = ''
   }
 
-  async function startRun() {
-    setRunState('running')
-    setAnalysisError('')
+  function friendlyError(error: unknown) {
+    const text = error instanceof Error ? error.message : String(error)
+    if (text.includes('Missing API key')) {
+      return language === 'zh' ? '先填写当前 AI 平台的 API Key。' : 'Add the API key for the selected AI provider first.'
+    }
+
+    if (text.includes('Failed to fetch')) {
+      return language === 'zh'
+        ? '网络请求失败，可能是 CORS、离线状态，或本地解析器未启动。'
+        : 'Request failed. This is usually CORS, offline access, or the local parser not running.'
+    }
+
+    return text
+  }
+
+  function buildSnapshot(): SavedProject {
+    return {
+      id: `${Date.now()}`,
+      projectName,
+      createdAt: new Date().toISOString(),
+      language,
+      selectedProvider,
+      files: files.map(({ id, name, kind, size }) => ({ id, name, kind, size })),
+      primaryFileId,
+      marketAppId,
+      marketUrl,
+      marketCountry,
+      marketIntel,
+      analysisNotes,
+      analysisResult,
+      parserResult,
+    }
+  }
+
+  function saveSnapshot() {
+    const snapshot = buildSnapshot()
+    setSavedProjects((current) => [snapshot, ...current].slice(0, 8))
+  }
+
+  function loadSnapshot(snapshot: SavedProject) {
+    setProjectName(snapshot.projectName)
+    setLanguage(snapshot.language)
+    setSelectedProvider(snapshot.selectedProvider)
+    setFiles(snapshot.files)
+    setPrimaryFileId(snapshot.primaryFileId)
+    setMarketAppId(snapshot.marketAppId)
+    setMarketUrl(snapshot.marketUrl)
+    setMarketCountry(snapshot.marketCountry)
+    setMarketIntel(snapshot.marketIntel)
+    setMarketStatus(
+      snapshot.marketIntel
+        ? language === 'zh'
+          ? '已载入历史商店快照。'
+          : 'Loaded saved App Store snapshot.'
+        : '',
+    )
+    setAnalysisNotes(snapshot.analysisNotes)
+    setAnalysisResult(snapshot.analysisResult)
+    setParserResult(snapshot.parserResult)
+    setAnalysisError(
+      snapshot.analysisResult
+        ? language === 'zh'
+          ? '已载入历史快照；若要重新解析 IPA，请重新上传原始文件。'
+          : 'Snapshot loaded. Re-upload the IPA if you want to parse it again.'
+        : '',
+    )
+    setRunState(snapshot.analysisResult ? 'done' : 'idle')
+    resetPipeline()
+    setActiveView(snapshot.analysisResult ? 'brief' : 'deconstruct')
+  }
+
+  async function loadMarketIntel() {
+    const appId = inferredMarketAppId
+    if (!appId) {
+      setMarketStatus(
+        language === 'zh' ? '请先填写 App Store 链接或 App ID。' : 'Add an App Store URL or app id first.',
+      )
+      return
+    }
+
+    setMarketStatus(language === 'zh' ? '抓取商店信息中' : 'Fetching App Store data')
 
     try {
+      const intel = await fetchMarketIntel(appId, marketCountry, language)
+      setMarketAppId(appId)
+      if (!marketUrl && intel.metadata?.storeUrl) {
+        setMarketUrl(intel.metadata.storeUrl)
+      }
+      setMarketIntel(intel)
+      setMarketStatus(
+        language === 'zh'
+          ? `已抓取 ${intel.metadata?.name ?? appId} 的商店信息`
+          : `Fetched App Store data for ${intel.metadata?.name ?? appId}`,
+      )
+    } catch (error) {
+      setMarketStatus(friendlyError(error))
+    }
+  }
+
+  async function startRun() {
+    if (runState === 'running') return
+
+    setRunState('running')
+    setAnalysisError('')
+    setAnalysisResult(null)
+    resetPipeline()
+
+    try {
+      updateStage(
+        'input',
+        'active',
+        language === 'zh' ? `已接收 ${files.length} 份材料` : `${files.length} inputs ready`,
+      )
+
+      if (!files.length && !analysisNotes.trim()) {
+        throw new Error(language === 'zh' ? '请先上传材料或填写备注。' : 'Add files or notes before running analysis.')
+      }
+
+      updateStage(
+        'input',
+        'done',
+        language === 'zh'
+          ? `主输入：${primaryFile?.name ?? '备注文本'}`
+          : `Primary input: ${primaryFile?.name ?? 'notes'}`,
+      )
+
+      let nextParserResult: ParserResult | null = null
+      const primaryIpa = files.find((item) => item.id === primaryFile?.id && item.kind === 'ipa')
+
+      if (useLocalParser) {
+        updateStage(
+          'parser',
+          'active',
+          language === 'zh' ? '尝试连接本地解析器' : 'Connecting to local parser',
+        )
+
+        if (primaryIpa?.file) {
+          nextParserResult = await callLocalParser(primaryIpa.file)
+          setParserResult(nextParserResult)
+          setParserConnection({
+            status: 'ready',
+            message:
+              language === 'zh'
+                ? '本地解析器在线，已提取结构化事实'
+                : 'Local parser is online and returned structured facts',
+          })
+          updateStage(
+            'parser',
+            'done',
+            nextParserResult.structure?.engine
+              ? `${language === 'zh' ? '引擎' : 'Engine'}: ${nextParserResult.structure.engine}`
+              : language === 'zh'
+                ? '已完成 IPA 解析'
+                : 'IPA parsed',
+          )
+        } else {
+          setParserResult(null)
+          updateStage(
+            'parser',
+            'error',
+            language === 'zh'
+              ? '没有可上传的 IPA 文件，回退到文本模式'
+              : 'No uploaded IPA available, falling back to text mode',
+          )
+        }
+      } else {
+        setParserResult(null)
+        updateStage(
+          'parser',
+          'done',
+          language === 'zh' ? '已关闭本地解析器' : 'Local parser disabled',
+        )
+      }
+
+      updateStage(
+        'prompt',
+        'active',
+        language === 'zh' ? '提取可读文本并组织上下文' : 'Extracting readable text and building context',
+      )
       const extractedText = await extractReadableText(files)
-      const prompt = buildAnalysisPrompt(language, files, analysisNotes, extractedText)
-      const config = providerConfigs[selectedProvider]
-      const text = await callAiProvider(selectedProvider, config, apiKeys[selectedProvider] ?? '', prompt)
-      const parsed = normalizeAnalysis(safeJsonParse(text))
+      const prompt = buildAnalysisPrompt(
+        language,
+        files,
+        analysisNotes,
+        extractedText,
+        nextParserResult,
+        marketIntel,
+      )
+      updateStage(
+        'prompt',
+        'done',
+        nextParserResult
+          ? language === 'zh'
+            ? '已附加结构化 IPA 事实'
+            : 'Structured IPA facts attached'
+          : language === 'zh'
+            ? '仅使用文本和备注'
+            : 'Using text inputs and notes only',
+      )
+
+      updateStage(
+        'analysis',
+        'active',
+        language === 'zh' ? `调用 ${providerConfig.label}` : `Calling ${providerConfig.label}`,
+      )
+      const text = await callAiProvider(selectedProvider, providerConfig, apiKeys[selectedProvider] ?? '', prompt)
+      const parsed = hydrateAnalysis(normalizeAnalysis(safeJsonParse(text)), nextParserResult, language)
+      updateStage(
+        'analysis',
+        'done',
+        parsed.status ?? (language === 'zh' ? '拆解完成' : 'Analysis complete'),
+      )
+
+      updateStage(
+        'brief',
+        'active',
+        language === 'zh' ? '整理 MVP 假设与任务' : 'Building MVP brief and task list',
+      )
       setAnalysisResult(parsed)
       setRunState('done')
+      updateStage(
+        'brief',
+        'done',
+        language === 'zh' ? 'Brief 已更新并可导出' : 'Brief updated and ready to export',
+      )
+      setActiveView('brief')
+
+      const snapshot = buildSnapshot()
+      snapshot.analysisResult = parsed
+      snapshot.parserResult = nextParserResult
+      setSavedProjects((current) => [snapshot, ...current].slice(0, 8))
     } catch (error) {
-      setAnalysisError(error instanceof Error ? error.message : String(error))
-      setRunState('idle')
+      const message = friendlyError(error)
+      setAnalysisError(message)
+      setRunState('error')
+      const activeStage =
+        pipelineStages.find((item) => item.state === 'active')?.key ??
+        'analysis'
+      updateStage(activeStage, 'error', message)
     }
   }
 
-  function exportBrief() {
-    const payload = {
-      language,
-      product: t.exportPayload.product,
-      files: files.map((file) => file.name),
-      hypothesis: t.exportPayload.hypothesis,
-      mustValidate: t.exportPayload.mustValidate,
-      notInMvp: t.exportPayload.notInMvp,
-    }
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json',
-    })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = language === 'zh' ? 'ios-mvp-brief.zh.json' : 'ios-mvp-brief.en.json'
-    link.click()
-    URL.revokeObjectURL(url)
-  }
-
-  const activeAgent = t.agents.list[selectedAgent]
-  const providerConfig = providerConfigs[selectedProvider]
   const displayLoop = analysisResult?.loop?.length === 4 ? analysisResult.loop : t.deconstruct.loop
   const displayModules =
     analysisResult?.modules && analysisResult.modules.length > 0
@@ -732,6 +1562,225 @@ function App() {
       ? analysisResult.opportunities
       : t.deconstruct.opportunities
   const briefStatement = analysisResult?.briefStatement ?? t.brief.statement
+
+  const briefCards = [
+    [
+      t.brief.cards[0][0],
+      analysisResult?.risks?.[0] ??
+        displayModules.find(([, , tone]) => tone === 'red' || tone === 'orange')?.[1] ??
+        t.brief.cards[0][1],
+    ],
+    [t.brief.cards[1][0], displayOpportunities[0] ?? t.brief.cards[1][1]],
+    [t.brief.cards[2][0], analysisResult?.mustValidate?.[0] ?? t.brief.cards[2][1]],
+    [t.brief.cards[3][0], analysisResult?.notInMvp?.join('、') || t.brief.cards[3][1]],
+  ]
+
+  const checklistItems = analysisResult?.nextTasks?.length
+    ? analysisResult.nextTasks
+    : analysisResult?.mustValidate?.length
+      ? analysisResult.mustValidate
+      : t.brief.checklist
+
+  const exportPayload = {
+    projectName,
+    language,
+    createdAt: new Date().toISOString(),
+    parserMode: useLocalParser ? 'local-parser' : 'text-only',
+    provider: providerConfig.label,
+    market: marketIntel
+      ? {
+          appId: marketIntel.appId,
+          country: marketIntel.country,
+          summary: summarizeMarketIntel(marketIntel, language),
+          fetchedAt: marketIntel.fetchedAt,
+          reviewThemes: marketIntel.reviewThemes,
+        }
+      : null,
+    files: files.map((file) => ({
+      name: file.name,
+      kind: file.kind,
+      size: file.size,
+      primary: file.id === primaryFile?.id,
+    })),
+    packageSummary: analysisResult?.packageSummary ?? '',
+    parserSummary: summarizeParserResult(parserResult, language),
+    hypothesis: briefStatement,
+    mustValidate: analysisResult?.mustValidate ?? [],
+    notInMvp: analysisResult?.notInMvp ?? [],
+    risks: analysisResult?.risks ?? [],
+    nextTasks: analysisResult?.nextTasks ?? [],
+    recommendation: analysisResult?.recommendation ?? '',
+    recommendationReason: analysisResult?.recommendationReason ?? '',
+  }
+
+  function downloadFile(content: string, filename: string, type: string) {
+    const blob = new Blob([content], { type })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function exportBrief(format: 'json' | 'md') {
+    if (format === 'json') {
+      downloadFile(
+        JSON.stringify(exportPayload, null, 2),
+        language === 'zh' ? 'ios-mvp-brief.zh.json' : 'ios-mvp-brief.en.json',
+        'application/json',
+      )
+      return
+    }
+
+    const markdown = [
+      '# iOS MVP Brief',
+      '',
+      `${language === 'zh' ? '项目' : 'Project'}: ${projectName}`,
+      `${language === 'zh' ? '主假设' : 'Hypothesis'}: ${briefStatement}`,
+      '',
+      `## ${language === 'zh' ? '包体摘要' : 'Package Summary'}`,
+      analysisResult?.packageSummary ?? summarizeParserResult(parserResult, language),
+      '',
+      `## ${language === 'zh' ? '必须验证' : 'Must Validate'}`,
+      ...(analysisResult?.mustValidate ?? []).map((item) => `- ${item}`),
+      '',
+      `## ${language === 'zh' ? '暂不进入 MVP' : 'Not In MVP'}`,
+      ...(analysisResult?.notInMvp ?? []).map((item) => `- ${item}`),
+      '',
+      `## ${language === 'zh' ? '风险' : 'Risks'}`,
+      ...(analysisResult?.risks ?? []).map((item) => `- ${item}`),
+      '',
+      `## ${language === 'zh' ? '下一步' : 'Next Tasks'}`,
+      ...(analysisResult?.nextTasks ?? []).map((item) => `- ${item}`),
+      '',
+      `## ${language === 'zh' ? '建议' : 'Recommendation'}`,
+      `${analysisResult?.recommendation ?? ''}`,
+      `${analysisResult?.recommendationReason ?? ''}`,
+    ].join('\n')
+
+    downloadFile(
+      markdown,
+      language === 'zh' ? 'ios-mvp-brief.zh.md' : 'ios-mvp-brief.en.md',
+      'text/markdown',
+    )
+  }
+
+  const agentArtifacts = [
+    {
+      name: t.agents.list[0][0],
+      status:
+        parserResult || !useLocalParser
+          ? language === 'zh'
+            ? '已完成'
+            : 'Done'
+          : runState === 'running'
+            ? language === 'zh'
+              ? '运行中'
+              : 'Running'
+            : language === 'zh'
+              ? '等待'
+              : 'Waiting',
+      tone: parserResult || !useLocalParser ? 'blue' : 'gray',
+      summary: analysisResult?.packageSummary ?? summarizeParserResult(parserResult, language),
+      required: language === 'zh' ? 'IPA 文件或主文件元数据' : 'IPA binary or primary package metadata',
+      output:
+        parserResult?.analysisHints?.join(' ') ??
+        (language === 'zh' ? '等待包体解析结果。' : 'Waiting for package facts.'),
+    },
+    {
+      name: t.agents.list[1][0],
+      status: marketIntel || analysisNotes.trim()
+        ? language === 'zh'
+          ? '已完成'
+          : 'Done'
+        : language === 'zh'
+          ? '待补充'
+          : 'Needs input',
+      tone: marketIntel || analysisNotes.trim() ? 'orange' : 'gray',
+      summary:
+        (marketIntel?.metadata ? summarizeMarketIntel(marketIntel, language) : '') ||
+        analysisNotes.trim() ||
+        (language === 'zh'
+          ? '请补充商店链接、评论、截图文案或试玩观察。'
+          : 'Add store links, reviews, ad copy, or playtest notes.'),
+      required: language === 'zh' ? '商店页、评论、市场反馈' : 'Store page, reviews, market notes',
+      output: language === 'zh' ? '竞品市场信号与商业化线索。' : 'Market signals and monetization clues.',
+    },
+    {
+      name: t.agents.list[2][0],
+      status: displayLoop.length ? (language === 'zh' ? '已完成' : 'Done') : language === 'zh' ? '等待' : 'Waiting',
+      tone: 'green',
+      summary: displayLoop.join(' -> '),
+      required: language === 'zh' ? '系统地图与首日目标' : 'System map and first-day goals',
+      output: language === 'zh' ? '10 秒 / 30 秒 / 5 分钟循环。' : '10 sec / 30 sec / 5 min loop.',
+    },
+    {
+      name: t.agents.list[3][0],
+      status: analysisResult ? (language === 'zh' ? '已完成' : 'Done') : language === 'zh' ? '等待' : 'Waiting',
+      tone: 'green',
+      summary: briefStatement,
+      required: language === 'zh' ? '竞争事实与创新空间' : 'Competitor facts and innovation space',
+      output: (analysisResult?.notInMvp ?? []).join('、') || t.agents.list[3][1],
+    },
+    {
+      name: t.agents.list[4][0],
+      status: analysisResult?.risks?.length ? (language === 'zh' ? '已完成' : 'Done') : language === 'zh' ? '等待' : 'Waiting',
+      tone: 'red',
+      summary: analysisResult?.risks?.[0] ?? t.agents.list[4][1],
+      required: language === 'zh' ? '引擎、框架、实现边界' : 'Engine, frameworks, implementation boundaries',
+      output:
+        parserResult?.structure?.engine
+          ? `${language === 'zh' ? '推测技术栈' : 'Likely stack'}: ${parserResult.structure.engine}`
+          : language === 'zh'
+            ? '等待技术线索。'
+            : 'Waiting for technical facts.',
+    },
+    {
+      name: t.agents.list[5][0],
+      status: analysisResult?.nextTasks?.length ? (language === 'zh' ? '已完成' : 'Done') : language === 'zh' ? '等待' : 'Waiting',
+      tone: 'gray',
+      summary: analysisResult?.nextTasks?.[0] ?? t.agents.list[5][1],
+      required: language === 'zh' ? '已批准范围与主风险' : 'Approved scope and primary risks',
+      output:
+        analysisResult?.nextTasks?.join(' / ') ??
+        (language === 'zh' ? '等待拆解结果。' : 'Waiting for analysis output.'),
+    },
+  ]
+  const activeAgent = agentArtifacts[selectedAgent]
+  const reviewRecommendation = analysisResult?.recommendation ?? t.review.recommendation
+  const reviewReason = analysisResult?.recommendationReason ?? t.review.recommendationCopy
+  const reviewFindings = [
+    {
+      label: language === 'zh' ? '包体事实' : 'Package fact',
+      value: analysisResult?.packageSummary ?? summarizeParserResult(parserResult, language),
+      tone: 'green',
+    },
+    {
+      label: language === 'zh' ? '市场信号' : 'Market signal',
+      value:
+        marketIntel?.reviewThemes.length
+          ? marketIntel.reviewThemes
+              .map((theme) => `${theme.label} x${theme.mentions}`)
+              .join(' / ')
+          : marketIntel?.metadata
+            ? summarizeMarketIntel(marketIntel, language)
+            : t.review.findings[0][1],
+      tone: 'orange',
+    },
+    {
+      label: language === 'zh' ? '下一轮重点' : 'Next iteration focus',
+      value: analysisResult?.nextTasks?.[0] ?? t.review.findings[2][1],
+      tone: 'red',
+    },
+  ]
+  const metricCards = [
+    { value: String(files.length), label: language === 'zh' ? '输入材料数' : 'Inputs' },
+    {
+      value: String((analysisResult?.mustValidate ?? []).length || checklistItems.length),
+      label: language === 'zh' ? '验证问题数' : 'Validation questions',
+    },
+  ]
 
   const languageButton = (
     <button
@@ -789,7 +1838,10 @@ function App() {
               </div>
               <div className="screen-actions">
                 {languageButton}
-                <button className="primary-action" onClick={startRun}>
+                <button className="secondary-action" onClick={saveSnapshot}>
+                  {language === 'zh' ? '保存快照' : 'Save snapshot'}
+                </button>
+                <button className="primary-action" onClick={startRun} disabled={runState === 'running'}>
                   {runState === 'running'
                     ? t.deconstruct.actionRunning
                     : t.deconstruct.actionIdle}
@@ -801,6 +1853,11 @@ function App() {
               <section className="panel upload-panel">
                 <h2>{t.deconstruct.uploadTitle}</h2>
                 <p>{t.deconstruct.uploadCopy}</p>
+
+                <div className="field-group">
+                  <label>{language === 'zh' ? '项目名' : 'Project name'}</label>
+                  <input value={projectName} onChange={(event) => setProjectName(event.target.value)} />
+                </div>
 
                 <label
                   className="drop-zone"
@@ -818,6 +1875,105 @@ function App() {
                 </label>
 
                 <div className="ai-config">
+                  <div className="parser-toggle">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={useLocalParser}
+                        onChange={(event) => setUseLocalParser(event.target.checked)}
+                      />
+                      <span>{language === 'zh' ? '启用本地 IPA 解析器' : 'Use local IPA parser'}</span>
+                    </label>
+                    <small className={`parser-state ${parserStatusDisplay.status}`}>
+                      {parserStatusDisplay.message}
+                    </small>
+                  </div>
+
+                  <div className="market-grid">
+                    <div className="field-group">
+                      <label>{language === 'zh' ? 'App Store 链接' : 'App Store URL'}</label>
+                      <input
+                        value={marketUrl}
+                        onChange={(event) => {
+                          const value = event.target.value
+                          setMarketUrl(value)
+                          if (!marketAppId) {
+                            setMarketAppId(parseAppStoreId(value))
+                          }
+                        }}
+                        placeholder="https://apps.apple.com/us/app/.../id1234567890"
+                      />
+                    </div>
+
+                    <div className="field-group">
+                      <label>{language === 'zh' ? 'App ID' : 'App ID'}</label>
+                      <input
+                        value={marketAppId}
+                        onChange={(event) => setMarketAppId(event.target.value)}
+                        placeholder="1234567890"
+                      />
+                    </div>
+
+                    <div className="field-group">
+                      <label>{language === 'zh' ? '国家区服' : 'Country'}</label>
+                      <input
+                        value={marketCountry}
+                        onChange={(event) => setMarketCountry(event.target.value.toLowerCase())}
+                        placeholder="us"
+                        maxLength={2}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="file-actions">
+                    <button className="secondary-action" onClick={loadMarketIntel}>
+                      {language === 'zh' ? '抓取商店信息' : 'Fetch App Store data'}
+                    </button>
+                  </div>
+
+                  {marketStatus && <p className="api-note">{marketStatus}</p>}
+                  {marketIntel?.metadata && (
+                    <div className="market-card">
+                      <div className="market-card-header">
+                        {marketIntel.metadata.artworkUrl && (
+                          <img src={marketIntel.metadata.artworkUrl} alt={marketIntel.metadata.name} />
+                        )}
+                        <div>
+                          <strong>{marketIntel.metadata.name}</strong>
+                          <span>{marketIntel.metadata.developer}</span>
+                          <span>
+                            {marketIntel.metadata.genre}
+                            {marketIntel.metadata.averageRating !== null &&
+                              ` · ${marketIntel.metadata.averageRating.toFixed(1)} / 5`}
+                          </span>
+                        </div>
+                      </div>
+                      <p>{marketIntel.metadata.description.slice(0, 220)}</p>
+                      {marketIntel.reviewThemes.length > 0 && (
+                        <div className="theme-chip-row">
+                          {marketIntel.reviewThemes.map((theme) => (
+                            <span className={`theme-chip ${theme.tone}`} key={theme.label}>
+                              {theme.label} x{theme.mentions}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {marketIntel.reviews.length > 0 && (
+                        <div className="review-snippets">
+                          {marketIntel.reviews.slice(0, 3).map((review) => (
+                            <article key={`${review.author}-${review.updated}`}>
+                              <strong>
+                                {review.title} · {review.rating}/5
+                              </strong>
+                              <span>{review.author}</span>
+                              <p>{review.content.slice(0, 140)}</p>
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="field-group">
                     <label>{language === 'zh' ? 'AI 平台' : 'AI provider'}</label>
                     <select
@@ -899,6 +2055,12 @@ function App() {
                   </p>
                 </div>
 
+                <div className="file-actions">
+                  <button className="secondary-action" onClick={clearInputs}>
+                    {language === 'zh' ? '清空输入' : 'Clear inputs'}
+                  </button>
+                </div>
+
                 <div className="file-stack">
                   {files.map((file) => (
                     <article className="file-row" key={file.id}>
@@ -906,10 +2068,44 @@ function App() {
                         <strong>{file.name}</strong>
                         <span>{t.fileKinds[file.kind]}</span>
                       </div>
-                      <small>{file.size}</small>
+                      <div className="file-row-actions">
+                        <small>{file.size}</small>
+                        <button
+                          className={file.id === primaryFile?.id ? 'file-chip active' : 'file-chip'}
+                          onClick={() => setPrimaryFileId(file.id)}
+                        >
+                          {file.id === primaryFile?.id
+                            ? language === 'zh'
+                              ? '主输入'
+                              : 'Primary'
+                            : language === 'zh'
+                              ? '设为主输入'
+                              : 'Set primary'}
+                        </button>
+                        <button className="file-chip" onClick={() => removeFile(file.id)}>
+                          {language === 'zh' ? '移除' : 'Remove'}
+                        </button>
+                      </div>
                     </article>
                   ))}
                 </div>
+
+                {savedProjects.length > 0 && (
+                  <div className="history-list">
+                    <h2>{language === 'zh' ? '最近快照' : 'Recent snapshots'}</h2>
+                    {savedProjects.map((snapshot) => (
+                      <article className="history-row" key={snapshot.id}>
+                        <div>
+                          <strong>{snapshot.projectName}</strong>
+                          <span>{formatTimestamp(snapshot.createdAt, language)}</span>
+                        </div>
+                        <button className="file-chip active" onClick={() => loadSnapshot(snapshot)}>
+                          {language === 'zh' ? '载入' : 'Load'}
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                )}
               </section>
 
               <section className="panel system-panel">
@@ -924,6 +2120,15 @@ function App() {
                       <i style={{ width: `${progress}%` }} />
                     </div>
                   </div>
+                </div>
+
+                <div className="stage-list">
+                  {displayedStages.map((stage) => (
+                    <article className={`stage-row ${stage.state}`} key={stage.key}>
+                      <strong>{stage.label}</strong>
+                      <span>{stage.detail}</span>
+                    </article>
+                  ))}
                 </div>
 
                 <div className="loop-strip">
@@ -960,6 +2165,9 @@ function App() {
                 <img src={phoneImage} alt={t.deconstruct.phoneAlt} className="inspector-image" />
                 <h2>{t.deconstruct.innovationTitle}</h2>
                 <p>{t.deconstruct.innovationCopy}</p>
+                {analysisResult?.packageSummary && (
+                  <p className="analysis-status">{analysisResult.packageSummary}</p>
+                )}
                 {(analysisResult?.status || analysisError) && (
                   <p className={analysisError ? 'analysis-status error' : 'analysis-status'}>
                     {analysisError || analysisResult?.status}
@@ -990,8 +2198,11 @@ function App() {
               </div>
               <div className="screen-actions">
                 {languageButton}
-                <button className="primary-action" onClick={exportBrief}>
-                  {t.brief.export}
+                <button className="secondary-action" onClick={() => exportBrief('md')}>
+                  Markdown
+                </button>
+                <button className="primary-action" onClick={() => exportBrief('json')}>
+                  {language === 'zh' ? '导出 JSON' : 'Export JSON'}
                 </button>
               </div>
             </header>
@@ -1002,7 +2213,7 @@ function App() {
                 <p className="brief-statement">{briefStatement}</p>
 
                 <div className="brief-grid">
-                  {t.brief.cards.map(([label, value]) => (
+                  {briefCards.map(([label, value]) => (
                     <article key={label}>
                       <span>{label}</span>
                       <strong>{value}</strong>
@@ -1013,7 +2224,7 @@ function App() {
 
               <aside className="panel mvp-checklist">
                 <h2>{t.brief.scopeTitle}</h2>
-                {t.brief.checklist.map((item) => (
+                {checklistItems.map((item) => (
                   <label key={item}>
                     <input type="checkbox" defaultChecked />
                     <span>{item}</span>
@@ -1042,19 +2253,19 @@ function App() {
 
             <div className="agent-layout">
               <section className="agent-board">
-                {t.agents.list.map(([name, job, status, tone], index) => (
+                {agentArtifacts.map((agent, index) => (
                   <button
                     className={
                       selectedAgent === index
-                        ? `agent-card selected ${tone}`
-                        : `agent-card ${tone}`
+                        ? `agent-card selected ${agent.tone}`
+                        : `agent-card ${agent.tone}`
                     }
-                    key={name}
+                    key={agent.name}
                     onClick={() => setSelectedAgent(index)}
                   >
-                    <span>{status}</span>
-                    <strong>{name}</strong>
-                    <small>{job}</small>
+                    <span>{agent.status}</span>
+                    <strong>{agent.name}</strong>
+                    <small>{agent.summary}</small>
                   </button>
                 ))}
               </section>
@@ -1062,15 +2273,15 @@ function App() {
               <aside className="agent-inspector">
                 <img src={productImage} alt={t.agents.imageAlt} className="agent-image" />
                 <p className="eyebrow">{t.agents.selected}</p>
-                <h2>{activeAgent[0]}</h2>
-                <p>{activeAgent[1]}</p>
+                <h2>{activeAgent.name}</h2>
+                <p>{activeAgent.summary}</p>
                 <div className="handoff-box">
                   <span>{t.agents.requiredInput}</span>
-                  <strong>{t.agents.requiredCopy}</strong>
+                  <strong>{activeAgent.required}</strong>
                 </div>
                 <div className="handoff-box">
                   <span>{t.agents.expectedOutput}</span>
-                  <strong>{t.agents.expectedCopy}</strong>
+                  <strong>{activeAgent.output}</strong>
                 </div>
               </aside>
             </div>
@@ -1087,7 +2298,15 @@ function App() {
               </div>
               <div className="screen-actions">
                 {languageButton}
-                <button className="primary-action" onClick={exportBrief}>
+                <button
+                  className="primary-action"
+                  onClick={() => {
+                    setAnalysisNotes((current) =>
+                      [current, '', ...(analysisResult?.nextTasks ?? [])].filter(Boolean).join('\n'),
+                    )
+                    setActiveView('deconstruct')
+                  }}
+                >
                   {t.review.action}
                 </button>
               </div>
@@ -1096,38 +2315,39 @@ function App() {
             <div className="review-layout">
               <section className="decision-panel">
                 <span>{t.review.recommendationLabel}</span>
-                <strong>{t.review.recommendation}</strong>
-                <p>{t.review.recommendationCopy}</p>
+                <strong>{reviewRecommendation}</strong>
+                <p>{reviewReason}</p>
               </section>
 
               <section className="metric-panel">
-                <article>
-                  <strong>72%</strong>
-                  <span>{t.review.metricOne}</span>
-                </article>
-                <article>
-                  <strong>04:40</strong>
-                  <span>{t.review.metricTwo}</span>
-                </article>
+                {metricCards.map((metric) => (
+                  <article key={metric.label}>
+                    <strong>{metric.value}</strong>
+                    <span>{metric.label}</span>
+                  </article>
+                ))}
               </section>
 
               <section className="panel findings-panel">
                 <h2>{t.review.findingsTitle}</h2>
-                {t.review.findings.map(([label, value, tone]) => (
-                  <article className={`finding ${tone}`} key={label}>
-                    <span>{label}</span>
-                    <strong>{value}</strong>
+                {reviewFindings.map((finding) => (
+                  <article className={`finding ${finding.tone}`} key={finding.label}>
+                    <span>{finding.label}</span>
+                    <strong>{finding.value}</strong>
                   </article>
                 ))}
               </section>
 
               <aside className="decision-actions">
                 {t.review.decisions.map((decision, index) => (
-                  <button className={index === 1 ? 'recommended' : undefined} key={decision}>
+                  <button
+                    className={decision === reviewRecommendation || index === 1 ? 'recommended' : undefined}
+                    key={decision}
+                  >
                     {decision}
                   </button>
                 ))}
-                <p>{t.review.next}</p>
+                <p>{(analysisResult?.nextTasks ?? []).join(' / ') || t.review.next}</p>
               </aside>
             </div>
           </section>

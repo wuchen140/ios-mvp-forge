@@ -33,6 +33,16 @@ npm install
 npm run dev
 ```
 
+## Local IPA Parser
+
+To enable structured IPA parsing in the browser app, start the bundled local parser in a second terminal:
+
+```bash
+npm run parser
+```
+
+The frontend probes `http://127.0.0.1:8787/health` and sends uploaded `.ipa` files to `POST /parse-ipa` when the **Use local IPA parser** toggle is on.
+
 ## Production Build
 
 ```bash
