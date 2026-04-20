@@ -6,12 +6,38 @@ type ViewKey = 'deconstruct' | 'brief' | 'agents' | 'review'
 type RunState = 'idle' | 'running' | 'done'
 type Language = 'zh' | 'en'
 type FileKind = 'ipa' | 'store' | 'video' | 'supporting'
+type ProviderId =
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'deepseek'
+  | 'qwen'
+  | 'openrouter'
+  | 'custom'
+type ProviderMode = 'openai-compatible' | 'anthropic' | 'gemini'
 
 type UploadedFile = {
   id: string
   name: string
   kind: FileKind
   size: string
+  file?: File
+}
+
+type ProviderConfig = {
+  label: string
+  endpoint: string
+  model: string
+  mode: ProviderMode
+}
+
+type AnalysisResult = {
+  loop?: string[]
+  modules?: [string, string, string][]
+  economyRows?: string[][]
+  opportunities?: string[]
+  briefStatement?: string
+  status?: string
 }
 
 const assetBase = import.meta.env.BASE_URL
@@ -38,6 +64,51 @@ const initialFiles: UploadedFile[] = [
     size: '428 MB',
   },
 ]
+
+const providerDefaults: Record<ProviderId, ProviderConfig> = {
+  openai: {
+    label: 'OpenAI',
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    model: 'gpt-4o-mini',
+    mode: 'openai-compatible',
+  },
+  anthropic: {
+    label: 'Anthropic Claude',
+    endpoint: 'https://api.anthropic.com/v1/messages',
+    model: 'claude-3-5-sonnet-latest',
+    mode: 'anthropic',
+  },
+  gemini: {
+    label: 'Google Gemini',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
+    model: 'gemini-2.5-flash',
+    mode: 'gemini',
+  },
+  deepseek: {
+    label: 'DeepSeek',
+    endpoint: 'https://api.deepseek.com/chat/completions',
+    model: 'deepseek-chat',
+    mode: 'openai-compatible',
+  },
+  qwen: {
+    label: 'Qwen / DashScope',
+    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen-plus',
+    mode: 'openai-compatible',
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'openai/gpt-4o-mini',
+    mode: 'openai-compatible',
+  },
+  custom: {
+    label: 'Custom API',
+    endpoint: 'https://your-domain.example/v1/chat/completions',
+    model: 'your-model',
+    mode: 'openai-compatible',
+  },
+}
 
 const copy = {
   en: {
@@ -322,6 +393,208 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function safeJsonParse(text: string): Partial<AnalysisResult> {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+  const source = fenced ?? text
+  const start = source.indexOf('{')
+  const end = source.lastIndexOf('}')
+
+  if (start === -1 || end === -1 || end <= start) {
+    return {
+      status: text.slice(0, 320),
+    }
+  }
+
+  try {
+    return JSON.parse(source.slice(start, end + 1)) as Partial<AnalysisResult>
+  } catch {
+    return {
+      status: text.slice(0, 320),
+    }
+  }
+}
+
+function normalizeAnalysis(raw: Partial<AnalysisResult>): AnalysisResult {
+  return {
+    loop: Array.isArray(raw.loop) ? raw.loop.slice(0, 4) : undefined,
+    modules: Array.isArray(raw.modules)
+      ? raw.modules
+          .slice(0, 4)
+          .map((item) => [String(item[0] ?? ''), String(item[1] ?? ''), String(item[2] ?? 'blue')])
+      : undefined,
+    economyRows: Array.isArray(raw.economyRows)
+      ? raw.economyRows
+          .slice(0, 5)
+          .map((row) => row.slice(0, 3).map((cell) => String(cell)))
+      : undefined,
+    opportunities: Array.isArray(raw.opportunities)
+      ? raw.opportunities.slice(0, 4).map((item) => String(item))
+      : undefined,
+    briefStatement: raw.briefStatement ? String(raw.briefStatement) : undefined,
+    status: raw.status ? String(raw.status) : undefined,
+  }
+}
+
+function buildAnalysisPrompt(
+  language: Language,
+  files: UploadedFile[],
+  notes: string,
+  extractedText: string,
+) {
+  const outputLanguage = language === 'zh' ? '中文' : 'English'
+  const fileSummary = files
+    .map((file) => `- ${file.name} | ${file.kind} | ${file.size}`)
+    .join('\n')
+
+  return `You are a senior mobile game product analyst. Deconstruct an iOS competitor mobile game package and supporting materials for MVP innovation planning.
+
+Output language: ${outputLanguage}
+
+Available inputs:
+${fileSummary}
+
+User notes / store links / playtest notes:
+${notes || '(none)'}
+
+Extracted readable file text:
+${extractedText || '(none)'}
+
+Important constraints:
+- If the IPA binary itself was provided, infer only from filename, package metadata, and user-supplied notes unless readable text is included.
+- Separate competitor facts from innovation assumptions.
+- Focus on iOS mobile game systems: first-day flow, battle/core loop, meta growth, economy, monetization pressure, live-ops cadence, retention risk.
+- Return only valid JSON. No markdown.
+
+JSON schema:
+{
+  "loop": ["four short loop stages"],
+  "modules": [["module title", "module finding", "blue|orange|green|red|gray"]],
+  "economyRows": [["resource/system", "observed clue", "design implication"]],
+  "opportunities": ["four innovation opportunities"],
+  "briefStatement": "one concise MVP strategic hypothesis",
+  "status": "short analysis status note"
+}`
+}
+
+async function extractReadableText(files: UploadedFile[]) {
+  const readableFiles = files.filter((item) => {
+    const name = item.name.toLowerCase()
+    return (
+      item.file &&
+      item.file.size <= 140_000 &&
+      !name.endsWith('.ipa') &&
+      !name.endsWith('.mp4') &&
+      !name.endsWith('.mov') &&
+      !name.endsWith('.zip')
+    )
+  })
+
+  const chunks = await Promise.all(
+    readableFiles.slice(0, 5).map(async (item) => {
+      try {
+        const text = await item.file!.text()
+        return `--- ${item.name} ---\n${text.slice(0, 16_000)}`
+      } catch {
+        return `--- ${item.name} ---\n(unreadable in browser)`
+      }
+    }),
+  )
+
+  return chunks.join('\n\n').slice(0, 48_000)
+}
+
+async function callAiProvider(
+  provider: ProviderId,
+  config: ProviderConfig,
+  apiKey: string,
+  prompt: string,
+) {
+  if (!apiKey.trim()) {
+    throw new Error('Missing API key')
+  }
+
+  if (config.mode === 'gemini') {
+    const endpoint = `${config.endpoint.replace(/\/$/, '')}/${config.model}:generateContent?key=${encodeURIComponent(apiKey)}`
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+        },
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`${config.label} ${response.status}: ${await response.text()}`)
+    }
+
+    const data = await response.json()
+    return data.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text).join('\n') ?? ''
+  }
+
+  if (config.mode === 'anthropic') {
+    const response = await fetch(config.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: config.model,
+        max_tokens: 2200,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`${config.label} ${response.status}: ${await response.text()}`)
+    }
+
+    const data = await response.json()
+    return data.content?.map((part: { text?: string }) => part.text).join('\n') ?? ''
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  }
+
+  if (provider === 'openrouter') {
+    headers['HTTP-Referer'] = window.location.origin
+    headers['X-Title'] = 'MVP Forge'
+  }
+
+  const response = await fetch(config.endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You return compact valid JSON for mobile game competitor deconstruction.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.2,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`${config.label} ${response.status}: ${await response.text()}`)
+  }
+
+  const data = await response.json()
+  return data.choices?.[0]?.message?.content ?? ''
+}
+
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>('deconstruct')
   const [language, setLanguage] = useState<Language>(() => {
@@ -331,6 +604,27 @@ function App() {
   const [files, setFiles] = useState<UploadedFile[]>(initialFiles)
   const [runState, setRunState] = useState<RunState>('idle')
   const [selectedAgent, setSelectedAgent] = useState(0)
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>(() => {
+    if (typeof window === 'undefined') return 'openai'
+    return (window.localStorage.getItem('mvp-forge-provider') as ProviderId) || 'openai'
+  })
+  const [providerConfigs, setProviderConfigs] = useState<Record<ProviderId, ProviderConfig>>(
+    () => {
+      if (typeof window === 'undefined') return providerDefaults
+      const saved = window.localStorage.getItem('mvp-forge-provider-configs')
+      return saved
+        ? { ...providerDefaults, ...(JSON.parse(saved) as Partial<Record<ProviderId, ProviderConfig>>) }
+        : providerDefaults
+    },
+  )
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>(() => {
+    if (typeof window === 'undefined') return {}
+    const saved = window.localStorage.getItem('mvp-forge-api-keys')
+    return saved ? (JSON.parse(saved) as Record<string, string>) : {}
+  })
+  const [analysisNotes, setAnalysisNotes] = useState('')
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
+  const [analysisError, setAnalysisError] = useState('')
 
   const t = copy[language]
   const nextLanguage: Language = language === 'zh' ? 'en' : 'zh'
@@ -339,6 +633,18 @@ function App() {
     window.localStorage.setItem('mvp-forge-language', language)
     document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en'
   }, [language])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-provider', selectedProvider)
+  }, [selectedProvider])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-provider-configs', JSON.stringify(providerConfigs))
+  }, [providerConfigs])
+
+  useEffect(() => {
+    window.localStorage.setItem('mvp-forge-api-keys', JSON.stringify(apiKeys))
+  }, [apiKeys])
 
   const progress = useMemo(() => {
     if (runState === 'idle') return 0
@@ -354,6 +660,7 @@ function App() {
       name: file.name,
       kind: file.name.endsWith('.ipa') ? 'ipa' : ('supporting' as FileKind),
       size: formatSize(file.size),
+      file,
     }))
 
     setFiles((current) => [...nextFiles, ...current])
@@ -370,9 +677,22 @@ function App() {
     event.target.value = ''
   }
 
-  function startRun() {
+  async function startRun() {
     setRunState('running')
-    window.setTimeout(() => setRunState('done'), 850)
+    setAnalysisError('')
+
+    try {
+      const extractedText = await extractReadableText(files)
+      const prompt = buildAnalysisPrompt(language, files, analysisNotes, extractedText)
+      const config = providerConfigs[selectedProvider]
+      const text = await callAiProvider(selectedProvider, config, apiKeys[selectedProvider] ?? '', prompt)
+      const parsed = normalizeAnalysis(safeJsonParse(text))
+      setAnalysisResult(parsed)
+      setRunState('done')
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error))
+      setRunState('idle')
+    }
   }
 
   function exportBrief() {
@@ -397,6 +717,21 @@ function App() {
   }
 
   const activeAgent = t.agents.list[selectedAgent]
+  const providerConfig = providerConfigs[selectedProvider]
+  const displayLoop = analysisResult?.loop?.length === 4 ? analysisResult.loop : t.deconstruct.loop
+  const displayModules =
+    analysisResult?.modules && analysisResult.modules.length > 0
+      ? analysisResult.modules
+      : t.deconstruct.modules
+  const displayEconomyRows =
+    analysisResult?.economyRows && analysisResult.economyRows.length > 0
+      ? analysisResult.economyRows
+      : t.deconstruct.economyRows
+  const displayOpportunities =
+    analysisResult?.opportunities && analysisResult.opportunities.length > 0
+      ? analysisResult.opportunities
+      : t.deconstruct.opportunities
+  const briefStatement = analysisResult?.briefStatement ?? t.brief.statement
 
   const languageButton = (
     <button
@@ -482,6 +817,88 @@ function App() {
                   <span>{t.deconstruct.dropHint}</span>
                 </label>
 
+                <div className="ai-config">
+                  <div className="field-group">
+                    <label>{language === 'zh' ? 'AI 平台' : 'AI provider'}</label>
+                    <select
+                      value={selectedProvider}
+                      onChange={(event) => setSelectedProvider(event.target.value as ProviderId)}
+                    >
+                      {Object.entries(providerDefaults).map(([id, provider]) => (
+                        <option value={id} key={id}>
+                          {provider.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="field-group">
+                    <label>{language === 'zh' ? 'API Key' : 'API key'}</label>
+                    <input
+                      type="password"
+                      value={apiKeys[selectedProvider] ?? ''}
+                      onChange={(event) =>
+                        setApiKeys((current) => ({
+                          ...current,
+                          [selectedProvider]: event.target.value,
+                        }))
+                      }
+                      placeholder={language === 'zh' ? '只保存在本地浏览器' : 'Stored only in this browser'}
+                    />
+                  </div>
+
+                  <div className="field-group">
+                    <label>{language === 'zh' ? '模型' : 'Model'}</label>
+                    <input
+                      value={providerConfig.model}
+                      onChange={(event) =>
+                        setProviderConfigs((current) => ({
+                          ...current,
+                          [selectedProvider]: {
+                            ...current[selectedProvider],
+                            model: event.target.value,
+                          },
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="field-group">
+                    <label>{language === 'zh' ? 'Endpoint' : 'Endpoint'}</label>
+                    <input
+                      value={providerConfig.endpoint}
+                      onChange={(event) =>
+                        setProviderConfigs((current) => ({
+                          ...current,
+                          [selectedProvider]: {
+                            ...current[selectedProvider],
+                            endpoint: event.target.value,
+                          },
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="field-group">
+                    <label>{language === 'zh' ? '补充材料' : 'Extra context'}</label>
+                    <textarea
+                      value={analysisNotes}
+                      onChange={(event) => setAnalysisNotes(event.target.value)}
+                      placeholder={
+                        language === 'zh'
+                          ? '粘贴商店链接、玩法观察、付费截图文字、活动规则等'
+                          : 'Paste store links, playtest notes, monetization copy, event rules, etc.'
+                      }
+                    />
+                  </div>
+
+                  <p className="api-note">
+                    {language === 'zh'
+                      ? '浏览器直连可能受平台 CORS 限制；自定义平台建议使用 OpenAI-compatible 接口。'
+                      : 'Direct browser calls can be limited by provider CORS; custom APIs should be OpenAI-compatible.'}
+                  </p>
+                </div>
+
                 <div className="file-stack">
                   {files.map((file) => (
                     <article className="file-row" key={file.id}>
@@ -510,7 +927,7 @@ function App() {
                 </div>
 
                 <div className="loop-strip">
-                  {t.deconstruct.loop.map((step) => (
+                  {displayLoop.map((step) => (
                     <div className="loop-step" key={step}>
                       <span>{step}</span>
                     </div>
@@ -518,7 +935,7 @@ function App() {
                 </div>
 
                 <div className="module-grid">
-                  {t.deconstruct.modules.map(([title, value, tone]) => (
+                  {displayModules.map(([title, value, tone]) => (
                     <article className={`module-card ${tone}`} key={title}>
                       <span>{title}</span>
                       <strong>{value}</strong>
@@ -527,7 +944,7 @@ function App() {
                 </div>
 
                 <div className="economy-table" role="table" aria-label={t.deconstruct.mapTitle}>
-                  {t.deconstruct.economyRows.map((row) => (
+                  {displayEconomyRows.map((row) => (
                     <div className="economy-row" role="row" key={row[0]}>
                       {row.map((cell) => (
                         <span role="cell" key={cell}>
@@ -543,8 +960,13 @@ function App() {
                 <img src={phoneImage} alt={t.deconstruct.phoneAlt} className="inspector-image" />
                 <h2>{t.deconstruct.innovationTitle}</h2>
                 <p>{t.deconstruct.innovationCopy}</p>
+                {(analysisResult?.status || analysisError) && (
+                  <p className={analysisError ? 'analysis-status error' : 'analysis-status'}>
+                    {analysisError || analysisResult?.status}
+                  </p>
+                )}
                 <div className="opportunity-stack">
-                  {t.deconstruct.opportunities.map((opportunity, index) => (
+                  {displayOpportunities.map((opportunity, index) => (
                     <article key={opportunity}>
                       <small>
                         {t.deconstruct.opportunityLabel} {index + 1}
@@ -577,7 +999,7 @@ function App() {
             <div className="brief-layout">
               <section className="panel brief-main">
                 <h2>{t.brief.strategyTitle}</h2>
-                <p className="brief-statement">{t.brief.statement}</p>
+                <p className="brief-statement">{briefStatement}</p>
 
                 <div className="brief-grid">
                   {t.brief.cards.map(([label, value]) => (

@@ -271,6 +271,62 @@ h2 {
   color: var(--muted-ink);
 }
 
+.ai-config {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
+.field-group {
+  display: grid;
+  gap: 6px;
+}
+
+.field-group label {
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.field-group input,
+.field-group select,
+.field-group textarea {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  padding: 10px 12px;
+  outline: 0;
+}
+
+.field-group textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.api-note,
+.analysis-status {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.analysis-status {
+  padding: 12px;
+  border-radius: 8px;
+  background: #2a2a2a;
+  color: #ffffff !important;
+}
+
+.analysis-status.error {
+  background: #3b1510;
+  color: #ffcabd !important;
+}
+
 .file-stack,
 .opportunity-stack,
 .module-grid,
