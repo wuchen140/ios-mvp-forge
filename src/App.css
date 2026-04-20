@@ -57,6 +57,7 @@
 .nav-item,
 .primary-action,
 .secondary-action,
+.language-toggle,
 .decision-actions button {
   border: 0;
   border-radius: 8px;
@@ -119,6 +120,14 @@
   gap: 24px;
 }
 
+.screen-actions {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .eyebrow {
   margin: 0 0 8px;
   color: var(--accent-strong);
@@ -154,11 +163,31 @@ h2 {
 }
 
 .primary-action,
-.secondary-action {
+.secondary-action,
+.language-toggle {
   min-height: 44px;
   padding: 0 18px;
   font-weight: 800;
   white-space: nowrap;
+}
+
+.language-toggle {
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.language-toggle span {
+  min-width: 42px;
+  border-radius: 999px;
+  background: var(--soft);
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: center;
 }
 
 .primary-action {
