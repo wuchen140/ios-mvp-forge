@@ -8,6 +8,7 @@ type Language = 'zh' | 'en'
 type FileKind = 'ipa' | 'store' | 'video' | 'supporting'
 type ProviderId =
   | 'openai'
+  | 'minimax'
   | 'anthropic'
   | 'gemini'
   | 'deepseek'
@@ -169,6 +170,12 @@ const providerDefaults: Record<ProviderId, ProviderConfig> = {
     label: 'OpenAI',
     endpoint: 'https://api.openai.com/v1/chat/completions',
     model: 'gpt-4o-mini',
+    mode: 'openai-compatible',
+  },
+  minimax: {
+    label: 'MiniMax',
+    endpoint: 'https://api.minimax.io/v1/chat/completions',
+    model: 'MiniMax-M2.7',
     mode: 'openai-compatible',
   },
   anthropic: {

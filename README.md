@@ -15,6 +15,7 @@ The app is built around one workflow:
 The browser app can call:
 
 - OpenAI
+- MiniMax
 - Anthropic Claude
 - Google Gemini
 - DeepSeek
